@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Vinay0905/Lyra_Tiger/main/LyraLogo.png" alt="Lyra Tiger Logo" width="200"/>
+</p>
+
 # Lyra Tiger
 
 Lyra Tiger is a local-first desktop assistant prototype built with FastAPI, LangGraph, pywebview, Groq, and a lightweight HTML/CSS/JS interface. It is organized as a phased build: backend setup, desktop UI shell, voice input/output, orchestration, browser bridge integration, vision, developer tools, and safety controls.
