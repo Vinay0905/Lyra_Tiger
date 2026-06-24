@@ -1,6 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+import json
+import io
+import soundfile as sf
+from datetime import datetime
 from src.config import settings
 from src.audio import AudioRecorder, transcribe_audio
 from src.tts import TTSEngine
@@ -23,6 +28,45 @@ app.add_middleware(
 # Instantiate local recording/speaking blocks
 recorder = AudioRecorder()
 tts = TTSEngine()
+
+def log_interaction(query_type: str, query: str, final_state: dict):
+    timestamp = datetime.now().isoformat()
+    intent = final_state.get("intent", "unknown")
+    confidence = final_state.get("confidence", 0.0)
+    reply = final_state.get("final_response", "")
+    action_logs = final_state.get("action_logs", [])
+    
+    # 1. Write to structured lyra_audit.jsonl
+    audit_entry = {
+        "timestamp": timestamp,
+        "query_type": query_type,
+        "query": query,
+        "intent": intent,
+        "confidence": confidence,
+        "reply": reply,
+        "action_logs": action_logs
+    }
+    try:
+        with open("lyra_audit.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(audit_entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[Logger Error] Failed to write to lyra_audit.jsonl: {e}")
+        
+    # 2. Write to human-readable lyra.log
+    try:
+        with open("lyra.log", "a", encoding="utf-8") as f:
+            f.write("====================================================\n")
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write(f"Query Type: {query_type.upper()}\n")
+            f.write(f"User Query: {query}\n")
+            f.write(f"Intent Classified: {intent} (confidence: {confidence:.2f})\n")
+            f.write(f"Lyra Response: {reply}\n")
+            f.write("Execution Log Trace:\n")
+            for log in action_logs:
+                f.write(f"  - {log}\n")
+            f.write("====================================================\n\n")
+    except Exception as e:
+        print(f"[Logger Error] Failed to write to lyra.log: {e}")
 
 class CommandRequest(BaseModel):
     text: str
@@ -60,6 +104,10 @@ async def handle_command(request: CommandRequest):
     try:
         # Run state graph synchronously
         final_state = compiled_agent.invoke(initial_state)
+        
+        # Log structured audit metrics
+        log_interaction("text", query, final_state)
+        
         return CommandResponse(
             status="success",
             reply=final_state["final_response"],
@@ -69,14 +117,17 @@ async def handle_command(request: CommandRequest):
         raise HTTPException(status_code=500, detail=f"Graph Execution Error: {str(e)}")
 
 @app.post("/voice_command", response_model=CommandResponse)
-async def handle_voice_command():
+async def handle_voice_command(file: UploadFile = File(...)):
+    import os
+    temp_path = "temp_voice_command.wav"
     try:
-        # Record microphone audio
-        wav_path = recorder.record()
+        # Save the uploaded file to a temporary location
+        with open(temp_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
         
         # Transcribe audio using Whisper
-        transcription = transcribe_audio(wav_path)
-        recorder.cleanup()
+        transcription = transcribe_audio(temp_path)
         
         if not transcription:
             raise HTTPException(status_code=400, detail="Could not capture speech.")
@@ -95,8 +146,8 @@ async def handle_voice_command():
         }
         final_state = compiled_agent.invoke(initial_state)
         
-        # Play synthesized speech
-        tts.speak(final_state["final_response"])
+        # Log structured audit metrics
+        log_interaction("voice", transcription, final_state)
         
         return CommandResponse(
             status="success",
@@ -105,9 +156,38 @@ async def handle_voice_command():
         )
         
     except Exception as e:
-        recorder.cleanup()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+@app.get("/tts")
+async def get_tts(text: str):
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+    
+    try:
+        # Generate raw samples using our local Kokoro-ONNX TTS engine
+        samples, sample_rate = tts.generate(text)
+        
+        # Save samples as a WAV file in memory
+        wav_io = io.BytesIO()
+        sf.write(wav_io, samples, sample_rate, format='WAV', subtype='PCM_16')
+        wav_io.seek(0)
+        
+        return StreamingResponse(wav_io, media_type="audio/wav")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS Synthesis Error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.main:app", host=settings.host, port=settings.port, reload=settings.debug)
+    uvicorn.run(
+        "src.main:app", 
+        host=settings.host, 
+        port=settings.port, 
+        reload=settings.debug,
+        reload_dirs=["src"] if settings.debug else None
+    )

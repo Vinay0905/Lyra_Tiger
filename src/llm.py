@@ -9,18 +9,24 @@ class ModularLLMClient:
     def __init__(self):
         self.chain = settings.llm_fallback_providers
 
+    def _is_valid_key(self, key: str) -> bool:
+        if not key:
+            return False
+        k = key.strip().lower()
+        return k != "" and "your_" not in k
+
     def chat_completion(self, prompt: str, system_instruction: str = "") -> str:
         """Runs inference through fallback chain list until a success occurs."""
         errors = []
         for provider in self.chain:
             try:
-                if provider == "groq" and settings.groq_api_key:
+                if provider == "groq" and self._is_valid_key(settings.groq_api_key):
                     return self._call_groq(prompt, system_instruction)
-                elif provider == "openai" and settings.openai_api_key:
+                elif provider == "openai" and self._is_valid_key(settings.openai_api_key):
                     return self._call_openai(prompt, system_instruction)
-                elif provider == "gemini" and settings.gemini_api_key:
+                elif provider == "gemini" and self._is_valid_key(settings.gemini_api_key):
                     return self._call_gemini(prompt, system_instruction)
-                elif provider == "openrouter" and settings.openrouter_api_key:
+                elif provider == "openrouter" and self._is_valid_key(settings.openrouter_api_key):
                     return self._call_openrouter(prompt, system_instruction)
             except Exception as e:
                 err_msg = f"{provider.upper()} call failed: {str(e)}"

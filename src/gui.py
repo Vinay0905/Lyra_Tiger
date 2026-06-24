@@ -2,10 +2,29 @@ import os
 import time
 import threading
 from pathlib import Path
+import sys
 import requests
 import webview
 from src.config import settings
 from src.hotkey import GlobalHotkeyManager
+
+# Set macOS process name early so the Dock displays "Lyra"
+if sys.platform == "darwin":
+    try:
+        from Foundation import NSProcessInfo
+        NSProcessInfo.processInfo().setProcessName_("Lyra")
+        print("[GUI] macOS process name set to Lyra.")
+    except Exception as e:
+        print(f"[GUI Warning] Failed to set process name early: {e}")
+
+# Monkeypatch macOS-specific WKWebView click-through behavior early
+if sys.platform == "darwin":
+    try:
+        from WebKit import WKWebView
+        WKWebView.acceptsFirstMouse_ = lambda self, event: True
+        print("[GUI] macOS click-through monkeypatch applied.")
+    except Exception as e:
+        print(f"[GUI Warning] Failed to apply acceptsFirstMouse patch: {e}")
 
 app_window = None
 is_visible = True
@@ -50,7 +69,14 @@ class WindowAPI:
 
     def close_app(self):
         print("[GUI] Exit requested.")
+        if sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
         os._exit(0)
+
+    def start_voice_capture(self):
+        print("[GUI] Voice capture triggered via JS API.")
+        threading.Thread(target=trigger_voice_capture, daemon=True).start()
 
 def trigger_voice_capture():
     """
@@ -79,11 +105,12 @@ def trigger_voice_capture():
         reply = data.get("reply", "Resonance lost. Try again.")
         route = data.get("route", "chat")
         
-        # Safely escape backslashes, single quotes, and double quotes for JS execution
-        safe_reply = reply.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"').replace("\n", " ")
+        # Safely convert reply to JSON string representation to prevent escape/newline errors
+        import json
+        safe_json = json.dumps(reply)
         
         # Step 4: Display reply and transition orb to speaking (glowing indigo-purple ripples)
-        app_window.evaluate_js(f"document.getElementById('output-box').innerText = '{safe_reply}';")
+        app_window.evaluate_js(f"document.getElementById('output-box').innerText = {safe_json};")
         app_window.evaluate_js("setOrbState('speaking');")
         app_window.evaluate_js(f"addAuditLog('Voice execution completed [{route}].');")
         
@@ -145,7 +172,64 @@ def start_gui():
     hotkeys = GlobalHotkeyManager(summon_callback=toggle_window)
     hotkeys.start()
 
-    webview.start(debug=settings.debug)
+    def setup_app():
+        if sys.platform == "darwin":
+            try:
+                from Foundation import NSBundle
+                from AppKit import NSApplication, NSImage, NSApplicationActivationPolicyRegular
+                
+                # 1. Force the activation policy to Regular so it appears in the Dock properly
+                app_inst = NSApplication.sharedApplication()
+                app_inst.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+                
+                # 2. Update bundle information in memory
+                bundle = NSBundle.mainBundle()
+                if bundle:
+                    info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+                    info['CFBundleName'] = "Lyra"
+                    info['CFBundleDisplayName'] = "Lyra"
+                    
+                # 3. Load and set application Dock icon
+                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+                icon_path = os.path.join(project_root, "LyraLogo.png")
+                if os.path.exists(icon_path):
+                    icon = NSImage.alloc().initWithContentsOfFile_(icon_path)
+                    app_inst.setApplicationIconImage_(icon)
+                    print("[GUI] macOS Dock icon set successfully in callback.")
+                else:
+                    print(f"[GUI Warning] Logo not found at path: {icon_path}")
+                
+                # 4. Wait for menu to be ready and rename it dynamically
+                def rename_menu():
+                    time.sleep(0.3)
+                    menu = app_inst.mainMenu()
+                    if menu:
+                        items = menu.itemArray()
+                        if len(items) > 0:
+                            app_menu_item = items[0]
+                            app_menu_item.setTitle_("Lyra")
+                            app_menu = app_menu_item.submenu()
+                            if app_menu:
+                                for sub_item in app_menu.itemArray():
+                                    title = sub_item.title()
+                                    if "Python" in title:
+                                        sub_item.setTitle_(title.replace("Python", "Lyra"))
+                                    elif "python" in title:
+                                        sub_item.setTitle_(title.replace("python", "Lyra"))
+                            print("[GUI] Renamed Menu Bar items and submenus successfully.")
+                
+                threading.Thread(target=rename_menu, daemon=True).start()
+
+            except Exception as e:
+                print(f"[GUI Warning] Failed to initialize macOS custom branding in callback: {e}")
+
+    try:
+        webview.start(setup_app, debug=settings.debug)
+    finally:
+        print("[GUI] Window closed. Cleaning up processes...")
+        if sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
 
 if __name__ == "__main__":
     start_gui()

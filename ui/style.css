@@ -122,11 +122,31 @@ html, body {
     flex: 1;
     font-size: 15px;
     line-height: 1.6;
+    font-weight: 300;
+    overflow-y: auto;
+    max-height: 235px;
+    padding: 16px 8px;
+    box-sizing: border-box;
+    text-align: center;
+}
+
+.mic-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 8px 12px;
+    color: var(--text-starlight);
+    cursor: pointer;
+    font-size: 14px;
+    transition: background 0.3s, color 0.3s;
     display: flex;
     align-items: center;
     justify-content: center;
-    text-align: center;
-    font-weight: 300;
+}
+
+.mic-btn:hover {
+    background: rgba(255, 255, 255, 0.15);
+    color: #f43f5e;
 }
 
 .input-row {

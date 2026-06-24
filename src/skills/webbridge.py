@@ -53,7 +53,7 @@ class KimiWebBridgeClient:
 
     def fill(self, selector: str, text: str) -> dict:
         print(f"[WebBridge] Filling element {selector} with value: {text}")
-        res = self._send_command("fill", {"selector": selector, "text": text})
+        res = self._send_command("fill", {"selector": selector, "value": text})
         if isinstance(res, dict):
             if "result" in res: return res["result"]
             if "data" in res: return res["data"]

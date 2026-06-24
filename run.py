@@ -10,28 +10,26 @@ def main():
 
     # Start FastAPI server process
     backend_proc = subprocess.Popen(
-        ["uv", "run", "python", "-m", "src.main"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True
+        ["uv", "run", "python", "-m", "src.main"]
     )
     
     print("[Launcher] Starting backend server...")
     time.sleep(2.5) # Wait for server bindings
     
     if backend_proc.poll() is not None:
-        print("[Launcher Error] Backend failed to bind. Output logs:")
-        out, _ = backend_proc.communicate()
-        print(out)
+        print("[Launcher Error] Backend failed to start. See logs above.")
         sys.exit(1)
         
-    print("[Launcher] Server active. Booting desktop window...")
+    print("[Launcher] Server active. Booting Tauri desktop window...")
     
     try:
-        subprocess.run(["uv", "run", "python", "-m", "src.gui"])
+        # Launch Tauri dev mode (which also starts the Vite frontend dev server)
+        subprocess.run(["npx", "@tauri-apps/cli", "dev"])
     finally:
         print("[Launcher] Shutdown triggered. Cleaning backend processes...")
         backend_proc.terminate()
+        if sys.platform == "darwin":
+            subprocess.run(["killall", "say"], stderr=subprocess.DEVNULL)
         try:
             backend_proc.wait(timeout=3)
         except subprocess.TimeoutExpired:

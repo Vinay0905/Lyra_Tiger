@@ -2,6 +2,14 @@
 __pycache__/
 *.py[cod]
 *$py.class
+# Model weights and audio resources
+src/resources/
+# Local scratch scripts (temporary test files)
+scratch/
+
+# Runtime audit logs
+lyra_audit.jsonl
+
 
 # Virtual environments
 .venv/

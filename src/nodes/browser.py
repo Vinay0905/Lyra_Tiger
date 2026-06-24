@@ -1,6 +1,7 @@
 import re
 import json
 import urllib.parse
+import time
 from src.agent_state import AgentState
 from src.skills.webbridge import KimiWebBridgeClient
 from src.llm import llm
@@ -10,40 +11,55 @@ webbridge = KimiWebBridgeClient()
 
 def clean_tree_representation(tree_data) -> str:
     """
-    Serializes and truncates page tree data to prevent large payload errors (413) in LLM APIs.
+    Recursively flattens and formats page tree data to provide accurate selector IDs and text,
+    excluding redundant nested static text nodes, preventing large payload errors in LLM APIs.
     """
     if not tree_data:
         return ""
     if isinstance(tree_data, str):
         return tree_data[:3000]
-    if isinstance(tree_data, dict):
+    if isinstance(tree_data, dict) and "tree" not in tree_data and "children" not in tree_data:
         return json.dumps(tree_data, indent=2)[:3000]
-    if isinstance(tree_data, list):
-        lines = []
-        for item in tree_data:
-            if isinstance(item, dict):
-                role = item.get("role") or item.get("type") or "element"
-                name = item.get("name") or item.get("text") or item.get("label") or ""
-                element_id = item.get("id") or item.get("elementId") or ""
-                lines.append(f"[{role}] {element_id} {repr(name)}")
-            else:
-                lines.append(str(item))
-        return "\n".join(lines)[:3000]
-    return str(tree_data)[:3000]
+
+    lines = []
+    
+    def walk(node, parent_name="", depth=0):
+        if isinstance(node, list):
+            for child in node:
+                walk(child, parent_name, depth)
+        elif isinstance(node, dict):
+            role = node.get("role") or node.get("type") or "element"
+            name = (node.get("name") or node.get("text") or node.get("label") or "").strip()
+            ref = node.get("ref") or node.get("id") or node.get("elementId") or ""
+            
+            is_redundant_text = (role in ("StaticText", "InlineTextBox", "image")) and (name == parent_name) and not ref
+            
+            should_print = (ref or name) and not is_redundant_text
+            
+            if should_print:
+                ref_str = f" {ref}" if ref else ""
+                name_str = f" {repr(name)}" if name else ""
+                lines.append(f"{'  ' * depth}[{role}]{ref_str}{name_str}")
+                
+            children = node.get("children", [])
+            if children:
+                next_parent = name if name else parent_name
+                next_depth = depth + 1 if should_print else depth
+                walk(children, next_parent, next_depth)
+                
+    walk(tree_data)
+    return "\n".join(lines)[:4000]
+
 
 def browser_skill_node(state: AgentState) -> dict:
     """
     Executes web browser actions using Kimi WebBridge.
-    Runs a multi-step agent loop using the LLM to decide on actions
-    (navigate, click, fill, done) based on the browser's accessibility tree.
+    Uses a single structured LLM call to decide whether to search directly,
+    navigate directly, or click a specific element on the page.
     """
     query = state["query"]
-    logs = ["Initiating browser orchestration loop."]
+    logs = ["Initiating browser routing agent."]
     
-    max_steps = 5
-    step_history = []
-    
-    # We will start by obtaining the current browser snapshot to see where we are
     current_url = ""
     current_title = ""
     current_tree = ""
@@ -58,104 +74,103 @@ def browser_skill_node(state: AgentState) -> dict:
     except Exception as e:
         logs.append(f"Failed to fetch initial page state: {e}")
 
-    for step in range(1, max_steps + 1):
-        logs.append(f"--- Browser Loop Step {step} ---")
+    system_instruction = (
+        "You are the browser routing agent for Lyra. Your job is to parse the user request "
+        "into a single structured action to execute. Output ONLY valid JSON matching the schema."
+    )
+    
+    prompt = f"""
+    Analyze the User Query and decide on the best direct browser action.
+    
+    Current page state:
+    - URL: {current_url}
+    - Title: {current_title}
+    
+    User Query: "{query}"
+    
+    Supported Actions:
+    1. "search": If the user wants to search for something on Google, YouTube, or Wikipedia.
+       - Set "platform" to "google", "youtube", or "wikipedia".
+       - Set "payload" to the search term (e.g. "modern web design trends", "FIFA 2026 highlights").
+    2. "navigate": If the user wants to open/navigate to a specific website directly (e.g., github.com, news.ycombinator.com).
+       - Set "platform" to "direct".
+       - Set "payload" to the fully-qualified URL (e.g., "https://github.com").
+    3. "click": If the user explicitly asks to click a link/element on the current page (e.g. "click the first search result", "click sign in").
+       - Set "platform" to "none".
+       - Set "selector" to the ID (e.g., "@e12") of the element from the simplified page tree below.
+    4. "done": If no action is needed or the query is already satisfied.
+    
+    Simplified page tree (only relevant for "click" action):
+    {current_tree}
+    
+    Output a valid JSON object matching this schema exactly:
+    {{
+        "thought": "Reasoning for your decision",
+        "action": "search" | "navigate" | "click" | "done",
+        "platform": "google" | "youtube" | "wikipedia" | "direct" | "none",
+        "payload": "search term or target URL (only for search or navigate)",
+        "selector": "element ID/selector (only for click)"
+    }}
+    """
+
+    try:
+        content = llm.chat_completion(prompt, system_instruction)
         
-        system_instruction = (
-            "You are the browser agent controller for Lyra. "
-            "Your job is to decide on the next browser action to satisfy the user's query. "
-            "Output ONLY valid JSON matching the specified schema."
-        )
+        # Clean potential markdown output formatting
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+            
+        decision = json.loads(content.strip())
         
-        prompt = f"""
-        User Query: "{query}"
-
-        Current Browser State:
-        - URL: {current_url}
-        - Title: {current_title}
-        - Simplified Page Tree (Accessibility / Text layout):
-        {current_tree}
-
-        Action History:
-        {json.dumps(step_history, indent=2)}
-
-        Decide on the next action. You can perform one of the following:
-        1. "navigate": Open a specific URL. Useful to go directly to search pages or platforms (like youtube.com, github.com, google.com).
-        2. "click": Click an element. Identify the element ID (e.g. "@e12") or CSS selector from the Page Tree.
-        3. "fill": Type text into a form input or search bar. Identify the element ID (e.g. "@e15") and specify the text.
-        4. "done": Exit the loop. Choose this once the user request has been fully completed (e.g. you navigated to and opened the correct video/page).
-
-        Output a valid JSON object matching this schema exactly:
-        {{
-            "thought": "Brief explanation of what you see on the screen and what action you will take next",
-            "action": "navigate" | "click" | "fill" | "done",
-            "url": "string (only required for navigate)",
-            "selector": "string (only required for click and fill, e.g. '@e25' or a valid CSS selector)",
-            "text": "string (only required for fill)"
-        }}
-        """
-
+        thought = decision.get("thought", "")
+        action = decision.get("action", "done").lower()
+        platform = decision.get("platform", "none").lower()
+        payload = decision.get("payload", "").strip()
+        selector = decision.get("selector", "").strip()
+        
+        logs.append(f"Agent Thought: {thought}")
+        
+        if action == "search" and payload:
+            encoded_payload = urllib.parse.quote(payload)
+            if platform == "youtube":
+                target_url = f"https://www.youtube.com/results?search_query={encoded_payload}"
+            elif platform == "wikipedia":
+                target_url = f"https://en.wikipedia.org/wiki/Special:Search?search={encoded_payload}"
+            else: # Default to google search
+                target_url = f"https://www.google.com/search?q={encoded_payload}"
+                
+            logs.append(f"Navigating to {platform} search URL: {target_url}")
+            webbridge.navigate(target_url)
+            time.sleep(3.0)
+            
+        elif action == "navigate" and payload:
+            # Ensure it is a valid fully qualified URL
+            if not payload.startswith("http://") and not payload.startswith("https://"):
+                payload = f"https://{payload}"
+            logs.append(f"Navigating to direct URL: {payload}")
+            webbridge.navigate(payload)
+            time.sleep(3.0)
+            
+        elif action == "click" and selector:
+            logs.append(f"Clicking selector: {selector}")
+            webbridge.click(selector)
+            time.sleep(3.0)
+            
+        else:
+            logs.append("No routing action needed or declared 'done'.")
+            
+    except Exception as e:
+        logs.append(f"Error during routing decision: {str(e)}")
+        # Ultimate fallback: Synthesize a direct Google search URL from the raw query
+        clean_query = query.replace("search", "").replace("google", "").strip()
+        fallback_url = f"https://www.google.com/search?q={urllib.parse.quote(clean_query)}"
+        logs.append(f"Falling back to direct Google Search URL: {fallback_url}")
         try:
-            content = llm.chat_completion(prompt, system_instruction)
-            
-            # Clean markdown JSON wraps
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-                
-            decision = json.loads(content.strip())
-            
-            thought = decision.get("thought", "")
-            action = decision.get("action", "done").lower()
-            
-            logs.append(f"Agent Thought: {thought}")
-            
-            if action == "done":
-                logs.append("Agent declared task is complete.")
-                break
-                
-            elif action == "navigate":
-                url = decision.get("url")
-                if not url:
-                    raise ValueError("Navigate action missing 'url'")
-                logs.append(f"Navigating to: {url}")
-                webbridge.navigate(url)
-                step_history.append({"step": step, "action": "navigate", "url": url, "thought": thought})
-                
-            elif action == "click":
-                selector = decision.get("selector")
-                if not selector:
-                    raise ValueError("Click action missing 'selector'")
-                logs.append(f"Clicking selector: {selector}")
-                webbridge.click(selector)
-                step_history.append({"step": step, "action": "click", "selector": selector, "thought": thought})
-                
-            elif action == "fill":
-                selector = decision.get("selector")
-                text = decision.get("text")
-                if not selector or text is None:
-                    raise ValueError("Fill action missing 'selector' or 'text'")
-                logs.append(f"Filling selector {selector} with text: {text}")
-                webbridge.fill(selector, text)
-                step_history.append({"step": step, "action": "fill", "selector": selector, "text": text, "thought": thought})
-                
-            else:
-                logs.append(f"Unknown action: '{action}'. Defaulting to done.")
-                break
-
-            # Update the page state for the next iteration
-            snapshot = webbridge.get_snapshot()
-            current_url = snapshot.get("url", "")
-            current_title = snapshot.get("title", "")
-            raw_tree = snapshot.get("tree") or snapshot.get("text") or snapshot.get("content") or ""
-            current_tree = clean_tree_representation(raw_tree)
-            logs.append(f"Updated page: '{current_title}', URL: {current_url}")
-
-        except Exception as e:
-            logs.append(f"Error during step {step} execution: {str(e)}")
-            logs.append("Aborting browser loop due to error.")
-            break
+            webbridge.navigate(fallback_url)
+        except Exception as err:
+            logs.append(f"Fallback navigation failed: {err}")
             
     return {
         "action_logs": logs

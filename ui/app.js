@@ -190,14 +190,20 @@ function triggerSummon() {
     const containerEl = document.getElementById('main-container');
     if (!containerEl) return;
     
-    const isExpanded = containerEl.classList.toggle('expanded');
+    const isCurrentlyExpanded = containerEl.classList.contains('expanded');
     
-    if (window.pywebview && window.pywebview.api) {
-        window.pywebview.api.toggle_expand(isExpanded);
-    }
-    
-    if (isExpanded) {
+    if (isCurrentlyExpanded) {
+        containerEl.classList.remove('expanded');
+        if (window.pywebview && window.pywebview.api) {
+            window.pywebview.api.toggle_expand(false);
+        }
         setOrbState('idle');
+    } else {
+        containerEl.classList.add('expanded');
+        if (window.pywebview && window.pywebview.api) {
+            window.pywebview.api.toggle_expand(true);
+            window.pywebview.api.start_voice_capture();
+        }
     }
 }
 
@@ -230,7 +236,21 @@ function submitCommand() {
             if (output && res) output.innerText = res.reply;
             setOrbState('speaking');
             if (res) addAuditLog(`Output: [${res.route}] processed.`);
+            
+            // Revert state back to idle after speaking completes (approx 6 seconds)
+            setTimeout(() => {
+                setOrbState('idle');
+            }, 6000);
         });
+    }
+}
+
+function triggerVoice() {
+    setOrbState('listening');
+    const output = document.getElementById('output-box');
+    if (output) output.innerText = 'Listening to your voice...';
+    if (window.pywebview && window.pywebview.api) {
+        window.pywebview.api.start_voice_capture();
     }
 }
 
