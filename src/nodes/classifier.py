@@ -4,6 +4,7 @@ from src.agent_state import AgentState
 from src.llm import llm
 from src.routing import heuristic_route
 from src.cache import classify_cache
+from src.resilience import metrics
 
 _VALID_INTENTS = {"browser", "vision", "developer", "chat"}
 
@@ -55,6 +56,7 @@ async def classifier_node(state: AgentState) -> dict:
 
     cached = classify_cache.get(cache_key)
     if cached is not None:
+        metrics.hit("classify")
         return {
             "intent": cached["intent"],
             "confidence": cached["confidence"],

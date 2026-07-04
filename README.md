@@ -54,15 +54,24 @@ Create a local `.env` from `.env.example` (see that file for all keys). Then run
 uv run python -m src.main
 ```
 
+Install the browser engine (Playwright) Chromium once (used by "bundled" mode
+and as the CDP fallback):
+
+```bash
+uv run playwright install chromium
+```
+
 Endpoints:
 
-- `GET  /health`
+- `GET  /health` — status + active browser mode
 - `POST /command` — buffered `{ text, session_id? }`
 - `POST /command/stream` — Server-Sent Events token stream
 - `POST /voice_command` — multipart WAV upload (`?session_id=`)
+- `POST /confirm` — resolve a gated action `{ session_id, approve, action }`
 - `GET  /tts?text=...&voice=...` — streamed WAV (content-cached)
 - `GET  /history?session_id=...`
 - `GET  /audit?session_id=...`
+- `GET  /metrics` — latency / breaker / cache telemetry
 
 ## Desktop shell
 
@@ -79,14 +88,38 @@ uv run python run.py
 ```
 
 - Click the menu-bar icon **or press ⌥Space** to summon the popover.
-- `⌘K` opens the command palette; `Esc` dismisses; the gear opens settings.
-- The window auto-hides on blur; the tray icon stays resident.
+- `⌘K` opens the command palette; `Esc` dismisses; the gear opens settings; the clock opens history.
+- The window is a native **NSPanel** anchored beneath the tray icon (non-activating,
+  floats over full-screen apps) and auto-hides on blur.
 
 ## Skills
 
-1. **Browser** — Kimi WebBridge automation (`127.0.0.1:10086`): search / navigate / click.
+1. **Browser** — owned Playwright engine (search / navigate / click / extract), policy-gated.
 2. **Vision** — captures the screen (`mss`) and analyzes it with Groq vision.
-3. **Developer** — clipboard read, file scaffolding, VS Code launch (allowlisted paths only).
+3. **Developer** — clipboard read, file scaffolding, VS Code launch (allowlisted paths only,
+   file writes require in-UI approval).
+
+## Web engine (Chrome integration)
+
+Two modes, set by `BROWSER_MODE` in `.env`:
+
+- **`cdp` (default) — attach to your real Chrome.** Launch Chrome with a debugging port,
+  then Lyra drives the browser you already use:
+
+```bash
+# macOS
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --remote-debugging-port=9222 --user-data-dir="$HOME/Library/Application Support/Lyra/chrome-cdp"
+```
+
+  Set `CHROME_CDP_URL=http://127.0.0.1:9222` (the default).
+
+- **`bundled` — Lyra launches its own Chromium** with an ephemeral profile (no setup;
+  requires `playwright install chromium`).
+
+All navigation passes a security policy: http/https only, no internal/loopback targets
+(SSRF guard), optional host allow/deny lists (`BROWSER_ALLOWLIST` / `BROWSER_DENYLIST`),
+downloads disabled, and a per-action time budget.
 
 ## Production packaging (Tauri sidecar)
 

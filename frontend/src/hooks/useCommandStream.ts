@@ -90,7 +90,12 @@ export function useCommandStream() {
           } else if (evt.type === 'done') {
             if (sentenceBuffer.trim()) enqueueSpeech(sentenceBuffer)
             sentenceBuffer = ''
-            updateMessage(assistantId, { streaming: false, route: evt.route })
+            updateMessage(assistantId, {
+              streaming: false,
+              route: evt.route,
+              skillResult: evt.skill_result ?? null,
+              pendingAction: evt.pending_action ?? null,
+            })
             addAuditLog(`Reply [${evt.route}] complete.`)
           } else if (evt.type === 'error') {
             throw new Error(evt.message)
@@ -117,7 +122,13 @@ export function useCommandStream() {
         body: JSON.stringify({ text: query, session_id: sessionId }),
       })
       const data = await r.json()
-      updateMessage(assistantId, { content: data.reply, route: data.route, streaming: false })
+      updateMessage(assistantId, {
+        content: data.reply,
+        route: data.route,
+        streaming: false,
+        skillResult: data.skill_result ?? null,
+        pendingAction: data.pending_action ?? null,
+      })
       addAuditLog(`Reply [${data.route}] received.`)
       enqueueSpeech(data.reply)
     } catch (err) {
@@ -127,5 +138,25 @@ export function useCommandStream() {
     }
   }
 
-  return { sendCommand }
+  // ── Human-in-the-loop resolution (L4 / UN4) ──────────────────────────────
+  const confirmAction = async (messageId: string, action: Record<string, unknown>, approve: boolean) => {
+    const { backendUrl, sessionId } = useSettingsStore.getState()
+    updateMessage(messageId, { resolved: true, pendingAction: null })
+    try {
+      const r = await fetch(`${backendUrl}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, approve, action }),
+      })
+      const data = await r.json()
+      addMessage('assistant', data.reply, { route: data.route, skillResult: data.skill_result ?? null })
+      if (approve) enqueueSpeech(data.reply)
+      addAuditLog(approve ? 'Action approved and executed.' : 'Action denied.')
+    } catch (err) {
+      addAuditLog(`Confirm error: ${err}`)
+      addMessage('assistant', 'The confirmation could not be processed.')
+    }
+  }
+
+  return { sendCommand, confirmAction }
 }

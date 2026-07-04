@@ -1,6 +1,7 @@
 import asyncio
 
 from src.agent_state import AgentState
+from src.schemas import VisionResult
 from src.skills.vision import DesktopVisionClient
 
 vision_client = DesktopVisionClient()
@@ -25,12 +26,12 @@ async def vision_skill_node(state: AgentState) -> dict:
         analysis_result = await vision_client.analyze_screenshot(img_path, prompt)
         logs.append("Analysis completed.")
 
-        updates["skill_result"] = {"analysis": analysis_result}
+        updates["skill_result"] = VisionResult(analysis=analysis_result).model_dump()
         updates["final_response"] = analysis_result
         updates["direct_response"] = True
     except Exception as e:
         logs.append(f"Vision capture error: {str(e)}")
-        updates["skill_result"] = {"error": str(e)}
+        updates["skill_result"] = VisionResult(error=str(e)).model_dump()
     finally:
         vision_client.cleanup()
 

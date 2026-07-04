@@ -18,8 +18,11 @@ from src.tts import TTSEngine
 from src.llm import llm
 from src.memory import store
 from src.cache import tts_cache
+from src.resilience import metrics
 from src.orchestrator import compiled_agent, run_until_format
 from src.nodes.formatter import build_formatter_prompt, SYSTEM_PERSONA
+from src.nodes.developer import execute_developer_action
+from src.skills.browser import get_browser_engine
 
 
 @asynccontextmanager
@@ -28,6 +31,10 @@ async def lifespan(app: FastAPI):
     yield
     await store.close()
     await llm.aclose()
+    try:
+        await get_browser_engine().aclose()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -68,6 +75,14 @@ class CommandResponse(BaseModel):
     route: str
     session_id: str
     transcription: Optional[str] = None
+    skill_result: Optional[dict] = None
+    pending_action: Optional[dict] = None
+
+
+class ConfirmRequest(BaseModel):
+    session_id: str
+    approve: bool
+    action: dict
 
 
 async def _build_initial_state(query: str, session_id: str) -> dict:
@@ -97,7 +112,8 @@ async def _persist_turn(session_id: str, query_type: str, query: str, final_stat
 async def health_check():
     return {
         "status": "healthy",
-        "webbridge_endpoint": f"http://{settings.webbridge_host}:{settings.webbridge_port}",
+        "browser_mode": settings.browser_mode,
+        "browser_endpoint": settings.chrome_cdp_url if settings.browser_mode == "cdp" else "bundled",
         "allowlisted_workspaces": len(settings.approved_workspace_paths),
     }
 
@@ -114,15 +130,57 @@ async def handle_command(request: CommandRequest):
 
     try:
         final_state = await compiled_agent.ainvoke(initial_state)
-        await _persist_turn(session_id, "text", query, final_state)
+        pending = final_state.get("pending_action")
+        # Only persist a completed turn; a confirmation prompt is not a final turn.
+        if not pending:
+            await _persist_turn(session_id, "text", query, final_state)
         return CommandResponse(
             status="success",
             reply=final_state["final_response"],
             route=final_state["intent"],
             session_id=session_id,
+            skill_result=final_state.get("skill_result"),
+            pending_action=pending,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Graph Execution Error: {str(e)}")
+
+
+@app.post("/confirm", response_model=CommandResponse)
+async def handle_confirm(request: ConfirmRequest):
+    """Resolve a human-in-the-loop gated action (L4)."""
+    action = request.action or {}
+    skill = action.get("skill")
+    operation = action.get("operation", "")
+    query = (action.get("payload") or {}).get("query", "")
+
+    if not request.approve:
+        reply = "Understood — I've cancelled that action."
+        await store.add_message(request.session_id, "assistant", reply)
+        return CommandResponse(status="success", reply=reply, route="developer",
+                               session_id=request.session_id)
+
+    try:
+        if skill == "developer":
+            result = await execute_developer_action(operation, query)
+            reply = (
+                f"Done. Created scaffold at {result.path}."
+                if result.ok and result.path
+                else f"The action could not be completed: {result.error}"
+            )
+            await store.add_message(request.session_id, "assistant", reply)
+            return CommandResponse(status="success", reply=reply, route="developer",
+                                   session_id=request.session_id, skill_result=result.model_dump())
+        raise HTTPException(status_code=400, detail=f"Unknown skill for confirmation: {skill}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/metrics")
+async def get_metrics():
+    return metrics.snapshot()
 
 
 # ── Streaming command (A2): SSE token stream ───────────────────────────────────
@@ -164,8 +222,18 @@ async def handle_command_stream(request: CommandRequest):
 
             final_text = "".join(collected).strip()
             state["final_response"] = final_text
-            await _persist_turn(session_id, "text-stream", query, state)
-            yield _sse({"type": "done", "reply": final_text, "route": intent, "session_id": session_id})
+            pending = state.get("pending_action")
+            # A confirmation prompt is not a completed turn — don't persist it.
+            if not pending:
+                await _persist_turn(session_id, "text-stream", query, state)
+            yield _sse({
+                "type": "done",
+                "reply": final_text,
+                "route": intent,
+                "session_id": session_id,
+                "skill_result": state.get("skill_result"),
+                "pending_action": pending,
+            })
         except Exception as e:
             yield _sse({"type": "error", "message": str(e)})
 
@@ -239,6 +307,7 @@ async def get_tts(text: str, voice: Optional[str] = None):
 
     cached = tts_cache.get(cache_key)
     if cached is not None:
+        metrics.hit("tts")
         wav_bytes, _ = cached
         return StreamingResponse(io.BytesIO(wav_bytes), media_type="audio/wav")
 

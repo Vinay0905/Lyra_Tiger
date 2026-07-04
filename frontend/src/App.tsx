@@ -11,6 +11,7 @@ import {
   ChevronUp,
   ChevronDown,
   Command,
+  Clock,
   Settings as SettingsIcon,
   X,
 } from 'lucide-react'
@@ -19,10 +20,12 @@ import { OrbVisualizer } from './components/OrbVisualizer'
 import { Transcript } from './components/Transcript'
 import { CommandPalette } from './components/CommandPalette'
 import { SettingsPanel } from './components/SettingsPanel'
+import { HistoryDrawer } from './components/HistoryDrawer'
 import { useWindowResizer } from './hooks/useWindowResizer'
 import { useVoiceCapture } from './hooks/useVoiceCapture'
 import { useSpeechPlayer } from './hooks/useSpeechPlayer'
 import { useCommandStream } from './hooks/useCommandStream'
+import { useConnectionHealth } from './hooks/useConnectionHealth'
 
 const GLOW_CONFIG = {
   idle:      'radial-gradient(ellipse at 50% 40%, rgba(0,100,255,0.16) 0%, transparent 70%)',
@@ -51,13 +54,15 @@ async function hideWindow() {
 
 function App() {
   useWindowResizer()
+  useConnectionHealth()
 
-  const { enqueueSpeech, interrupt, unlockAudio } = useSpeechPlayer()
+  const { enqueueSpeech, playSpeech, interrupt, unlockAudio } = useSpeechPlayer()
   const { isRecording, startRecording, stopRecording } = useVoiceCapture(enqueueSpeech, interrupt)
-  const { sendCommand } = useCommandStream()
+  const { sendCommand, confirmAction } = useCommandStream()
 
   const {
     orbState,
+    connection,
     isMuted,
     isSpeakerActive,
     auditLogs,
@@ -71,6 +76,8 @@ function App() {
   const [showLogsDrawer, setShowLogsDrawer] = useState(false)
   const [showPalette, setShowPalette] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showHistory, setShowHistory] = useState(false)
+  const [caretX, setCaretX] = useState<number | null>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -88,13 +95,14 @@ function App() {
       } else if (e.key === 'Escape') {
         if (showPalette) setShowPalette(false)
         else if (showSettings) setShowSettings(false)
+        else if (showHistory) setShowHistory(false)
         else if (showTextDrawer) setShowTextDrawer(false)
         else void hideWindow()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [showPalette, showSettings, showTextDrawer, unlockAudio])
+  }, [showPalette, showSettings, showHistory, showTextDrawer, unlockAudio])
 
   // ── Auto-focus the input whenever the popover is summoned (U1) ────────────
   useEffect(() => {
@@ -115,6 +123,21 @@ function App() {
     return () => { if (unlisten) unlisten() }
   }, [unlockAudio])
 
+  // ── Caret alignment: Rust emits where the tray icon sits (UN1) ────────────
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    ;(async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window')
+        unlisten = await getCurrentWindow().listen<number>('tray-caret', ({ payload }) => {
+          if (typeof payload === 'number' && isFinite(payload)) setCaretX(payload)
+        })
+      } catch (err) { console.error('caret listener error', err) }
+    })()
+    return () => { if (unlisten) unlisten() }
+  }, [])
+
   useEffect(() => {
     if (showTextDrawer) setTimeout(() => inputRef.current?.focus(), 40)
   }, [showTextDrawer])
@@ -132,20 +155,37 @@ function App() {
     else startRecording()
   }
 
-  const statusColor = {
-    idle: 'bg-emerald-400', listening: 'bg-cyan-400', thinking: 'bg-indigo-400',
-    speaking: 'bg-blue-400', error: 'bg-rose-500',
-  }[orbState]
+  // Connection state (UN3) supersedes the orb status when the backend is unhealthy.
+  const connectionDown = connection === 'disconnected' || connection === 'degraded'
+  const statusColor = connectionDown
+    ? (connection === 'disconnected' ? 'bg-rose-500' : 'bg-amber-400')
+    : { idle: 'bg-emerald-400', listening: 'bg-cyan-400', thinking: 'bg-indigo-400',
+        speaking: 'bg-blue-400', error: 'bg-rose-500' }[orbState]
 
-  const statusLabel = orbState === 'idle' ? 'Ready' : orbState.charAt(0).toUpperCase() + orbState.slice(1)
+  const statusLabel = connection === 'disconnected'
+    ? 'Offline'
+    : connection === 'degraded'
+    ? 'Reconnecting'
+    : connection === 'connecting'
+    ? 'Connecting'
+    : orbState === 'idle'
+    ? 'Ready'
+    : orbState.charAt(0).toUpperCase() + orbState.slice(1)
 
   return (
     <div className="w-full h-full relative select-none overflow-hidden flex flex-col items-center pt-[10px]">
+      {/* Caret points up at the tray icon; x-offset is emitted by Rust (UN1).
+          Falls back to horizontal centering when no anchor is known yet. */}
       <div
         style={{
+          position: caretX === null ? 'relative' : 'absolute',
+          left: caretX === null ? undefined : Math.max(12, Math.min(caretX - 10, 338)),
+          top: caretX === null ? undefined : 0,
           width: 0, height: 0,
           borderLeft: '10px solid transparent', borderRight: '10px solid transparent',
-          borderBottom: '10px solid rgba(20,20,25,0.95)', flexShrink: 0,
+          borderBottom: '10px solid rgb(var(--lyra-surface-2) / 0.95)', flexShrink: 0,
+          transition: 'left 0.18s ease',
+          zIndex: 30,
         }}
       />
 
@@ -157,9 +197,9 @@ function App() {
         exit="exit"
         className="w-full flex-1 flex flex-col rounded-2xl overflow-hidden"
         style={{
-          background: 'rgba(12,12,16,0.96)',
-          border: '1px solid rgba(255,255,255,0.08)',
-          boxShadow: '0 24px 64px rgba(0,0,0,0.7)',
+          background: 'rgb(var(--lyra-surface) / var(--lyra-panel-alpha))',
+          border: '1px solid rgb(var(--lyra-border) / var(--lyra-border-alpha))',
+          boxShadow: 'var(--lyra-elevation)',
           backdropFilter: 'blur(24px)',
           WebkitBackdropFilter: 'blur(24px)',
         }}
@@ -185,6 +225,13 @@ function App() {
           </div>
 
           <div className="flex items-center gap-1" data-tauri-no-drag>
+            <button
+              onClick={() => setShowHistory(true)}
+              className="p-1.5 rounded-full hover:bg-white/8 text-neutral-500 hover:text-white transition-colors"
+              title="History"
+            >
+              <Clock size={14} />
+            </button>
             <button
               onClick={() => { unlockAudio(); setShowPalette(true) }}
               className="p-1.5 rounded-full hover:bg-white/8 text-neutral-500 hover:text-white transition-colors"
@@ -214,7 +261,11 @@ function App() {
           <div style={{ width: 110, height: 110, flexShrink: 0 }}>
             <OrbVisualizer width={110} height={110} />
           </div>
-          <Transcript />
+          <Transcript
+            onConfirm={(id, action, approve) => confirmAction(id, action, approve)}
+            onSpeakAgain={(text) => { unlockAudio(); playSpeech(text) }}
+            onRegenerate={(text) => text && sendCommand(text)}
+          />
         </div>
 
         {/* Bottom controls */}
@@ -358,6 +409,14 @@ function App() {
         </AnimatePresence>
         <AnimatePresence>
           {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+        </AnimatePresence>
+        <AnimatePresence>
+          {showHistory && (
+            <HistoryDrawer
+              onClose={() => setShowHistory(false)}
+              onReuse={(q) => sendCommand(q)}
+            />
+          )}
         </AnimatePresence>
       </motion.div>
     </div>
