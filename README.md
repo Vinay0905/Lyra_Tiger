@@ -4,40 +4,43 @@
 
 # Lyra Tiger
 
-Lyra Tiger is a local-first desktop assistant prototype built with FastAPI, LangGraph, pywebview, Groq, and a lightweight HTML/CSS/JS interface. It is organized as a phased build: backend setup, desktop UI shell, voice input/output, orchestration, browser bridge integration, vision, developer tools, and safety controls.
+Lyra Tiger is a local-first, native-style macOS **menu-bar AI assistant**. It pairs a
+**Tauri (Rust) shell** hosting a React 19 + Three.js UI with a **FastAPI + LangGraph**
+Python "brain". The assistant lives in the menu bar (no Dock icon), drops down as a
+frosted popover, and responds to voice or text with a local streaming voice.
 
-## Current Capabilities
-
-- FastAPI backend with `/health`, `/command`, and `/voice_command`
-- LangGraph orchestration for routing commands into chat, browser, vision, and developer paths
-- Modular LLM client with provider fallback support
-- Groq speech-to-text integration
-- Local TTS support through macOS `say` or `pyttsx3`
-- pywebview desktop shell with a Three.js orb UI
-- Kimi WebBridge client scaffolding for browser automation
-- Allowlisted workspace paths for developer/file operations
-
-## Project Structure
+## Architecture
 
 ```text
-AI_Assistant/
-├── docs/                 # Phase docs and architecture notes
-├── src/                  # Backend, orchestration, skills, GUI shell
-│   ├── main.py           # FastAPI app
-│   ├── gui.py            # pywebview desktop window
-│   ├── orchestrator.py   # LangGraph workflow
-│   ├── llm.py            # LLM fallback client
-│   ├── audio.py          # Recording and transcription
-│   ├── tts.py            # Speech output
-│   ├── nodes/            # LangGraph nodes
-│   └── skills/           # Browser, vision, developer helpers
-├── ui/                   # Desktop UI assets
+Lyra_Tiger/
+├── src/                  # Python backend (FastAPI + LangGraph brain)
+│   ├── main.py           # FastAPI app: /command, /command/stream, /voice_command, /tts, /history, /audit
+│   ├── orchestrator.py   # LangGraph workflow + streaming pre-format runner
+│   ├── agent_state.py    # Shared graph state (reducers, structured skill_result)
+│   ├── llm.py            # Async httpx LLM client (buffered + token streaming, provider fallback)
+│   ├── routing.py        # Tier-0 heuristic intent router
+│   ├── cache.py          # TTL classification cache + LRU TTS cache
+│   ├── memory.py         # aiosqlite conversation memory + unified audit store
+│   ├── audio.py          # Async Groq Whisper transcription
+│   ├── tts.py            # Local Kokoro-82M ONNX synthesis
+│   ├── nodes/            # LangGraph nodes (classifier, browser, vision, developer, formatter)
+│   └── skills/           # Browser (Kimi WebBridge), Vision (mss + Groq), Developer tools
+├── src-tauri/            # Rust shell: tray icon, popover, global shortcut (⌥Space)
+├── frontend/             # React 19 + Vite + Tailwind + Three.js UI
 ├── pyproject.toml
-├── uv.lock
 └── README.md
 ```
 
-## Setup
+### Data flow
+
+```text
+UI (voice/text) ──► FastAPI ──► LangGraph (classify → skill → format)
+                                   │
+        streaming tokens ◄─────────┘  (SSE /command/stream)
+        sentence-chunked TTS ◄──── /tts (cached, Kokoro ONNX)
+```
+
+## Backend
 
 Install dependencies with `uv`:
 
@@ -45,109 +48,59 @@ Install dependencies with `uv`:
 uv sync
 ```
 
-Create a local `.env` file. Do not commit this file.
-
-```env
-GROQ_API_KEY=your_groq_key_here
-OPENAI_API_KEY=
-GEMINI_API_KEY=
-OPENROUTER_API_KEY=
-
-LLM_FALLBACK_CHAIN=groq
-
-GROQ_MODEL=llama-3.3-70b-versatile
-GROQ_VISION_MODEL=llama-3.2-11b-vision-preview
-OPENAI_MODEL=gpt-4o-mini
-GEMINI_MODEL=gemini-1.5-flash
-OPENROUTER_MODEL=meta-llama/llama-3-70b-instruct
-
-HOST=127.0.0.1
-PORT=8000
-LYRA_DEBUG=False
-
-APPROVED_WORKSPACE_DIRS=/Users/mast/Documents/VInayPrograming/AI_Assistant/workspace
-
-WEBBRIDGE_HOST=127.0.0.1
-WEBBRIDGE_PORT=10086
-```
-
-Create the local workspace folder:
-
-```bash
-mkdir -p workspace
-```
-
-## Run The Backend
+Create a local `.env` from `.env.example` (see that file for all keys). Then run:
 
 ```bash
 uv run python -m src.main
 ```
 
-Health check:
+Endpoints:
+
+- `GET  /health`
+- `POST /command` — buffered `{ text, session_id? }`
+- `POST /command/stream` — Server-Sent Events token stream
+- `POST /voice_command` — multipart WAV upload (`?session_id=`)
+- `GET  /tts?text=...&voice=...` — streamed WAV (content-cached)
+- `GET  /history?session_id=...`
+- `GET  /audit?session_id=...`
+
+## Desktop shell
+
+From `frontend/`:
 
 ```bash
-curl http://127.0.0.1:8000/health
+npm install
 ```
 
-Text command test:
+Then, from the repo root, launch backend + Tauri together:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/command \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Search Google for Lyra constellation"}'
+uv run python run.py
 ```
 
-## Run The Desktop UI
+- Click the menu-bar icon **or press ⌥Space** to summon the popover.
+- `⌘K` opens the command palette; `Esc` dismisses; the gear opens settings.
+- The window auto-hides on blur; the tray icon stays resident.
 
-```bash
-uv run python -m src.gui
-```
+## Skills
 
-The GUI starts as a small `80x80` floating orb. Click the orb to expand the panel. Keep `LYRA_DEBUG=False` unless you intentionally want pywebview's Web Inspector.
+1. **Browser** — Kimi WebBridge automation (`127.0.0.1:10086`): search / navigate / click.
+2. **Vision** — captures the screen (`mss`) and analyzes it with Groq vision.
+3. **Developer** — clipboard read, file scaffolding, VS Code launch (allowlisted paths only).
 
-## Voice Command
+## Production packaging (Tauri sidecar)
 
-The voice route records microphone input, transcribes it, runs orchestration, and speaks the final response.
+For distribution, freeze the Python backend and ship it as a Tauri **sidecar**:
 
-```bash
-curl -X POST http://127.0.0.1:8000/voice_command
-```
+1. Build a single-file backend: `uv run pyinstaller --onefile -n lyra-backend src/main.py`
+   (bundle the Kokoro weights via `LYRA_KOKORO_DIR` or PyInstaller `--add-data`).
+2. Place the binary at `src-tauri/binaries/lyra-backend-<target-triple>`.
+3. Register it under `bundle.externalBin` in `tauri.conf.json` and spawn it from
+   Rust on startup (health-check + auto-restart), instead of `run.py`.
+4. `npm run build` in `frontend/`, then `tauri build`.
 
-On macOS, microphone permissions may be required for the terminal app running the backend.
-
-## Kimi WebBridge
-
-Browser automation uses Kimi WebBridge on:
-
-```text
-127.0.0.1:10086
-```
-
-Install command used during local setup:
-
-```bash
-curl -fsSL https://kimi-web-img.moonshot.cn/webbridge/install.sh | bash
-```
-
-Check whether something is listening:
-
-```bash
-lsof -i :10086
-```
-
-Note: `/` and `/health` may return `404 page not found`; that does not necessarily mean the service is down. The bridge may expose only specific API/WebSocket routes.
-
-## Development Notes
+## Development notes
 
 - Keep secrets in `.env`; commit only `.env.example`.
-- `uv.lock` should be committed for reproducible installs.
-- The app uses `LYRA_DEBUG`, not generic `DEBUG`, to avoid shell environment collisions.
-- Some browser/voice/vision features require external services and macOS permissions.
-
-## GitHub Setup
-
-Repository:
-
-```text
-https://github.com/Vinay0905/Lyra_Tiger.git
-```
+- Conversation memory + audit trail persist to a single SQLite file (`LYRA_DB_PATH`).
+- Kokoro weights download once on first `/tts`; bundle them for offline/first-run reliability.

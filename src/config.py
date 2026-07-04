@@ -23,8 +23,13 @@ class Settings(BaseSettings):
 
     # LLM Configurations
     llm_fallback_chain: str = Field("groq", validation_alias="LLM_FALLBACK_CHAIN")
-    groq_model: str = Field("llama3-70b-8192", validation_alias="GROQ_MODEL")
+    # Large / primary reasoning model (accepts GROQ_MODEL or GROQ_CHAT_MODEL)
+    groq_model: str = Field("llama-3.3-70b-versatile", validation_alias="GROQ_MODEL")
+    groq_chat_model: str = Field("", validation_alias="GROQ_CHAT_MODEL")
+    # Small / fast tier used by the intent router (A4 tiered routing)
+    groq_small_model: str = Field("llama-3.1-8b-instant", validation_alias="GROQ_SMALL_MODEL")
     groq_vision_model: str = Field("llama-3.2-11b-vision-preview", validation_alias="GROQ_VISION_MODEL")
+    groq_stt_model: str = Field("whisper-large-v3", validation_alias="GROQ_STT_MODEL")
     openai_model: str = Field("gpt-4o-mini", validation_alias="OPENAI_MODEL")
     gemini_model: str = Field("gemini-1.5-flash", validation_alias="GEMINI_MODEL")
     openrouter_model: str = Field("meta-llama/llama-3-70b-instruct", validation_alias="OPENROUTER_MODEL")
@@ -33,6 +38,17 @@ class Settings(BaseSettings):
     host: str = Field("127.0.0.1", validation_alias="HOST")
     port: int = Field(8000, validation_alias="PORT")
     debug: bool = Field(True, validation_alias="LYRA_DEBUG")
+
+    # Persistence (A3: unified SQLite conversation + audit store)
+    db_path: str = Field("lyra_store.db", validation_alias="LYRA_DB_PATH")
+    history_turns: int = Field(8, validation_alias="LYRA_HISTORY_TURNS")
+
+    # Caching (A4: classification + TTS caches)
+    classify_cache_ttl: int = Field(600, validation_alias="LYRA_CLASSIFY_CACHE_TTL")
+    tts_cache_size: int = Field(64, validation_alias="LYRA_TTS_CACHE_SIZE")
+
+    # Voice
+    tts_voice: str = Field("af_sarah", validation_alias="TTS_VOICE")
 
     # Developer settings
     approved_workspace_dirs: str = Field("", validation_alias="APPROVED_WORKSPACE_DIRS")
@@ -72,5 +88,10 @@ class Settings(BaseSettings):
     @property
     def approved_workspace_paths(self) -> list[str]:
         return [p.strip() for p in self.approved_workspace_dirs.split(",") if p.strip()]
+
+    @property
+    def primary_chat_model(self) -> str:
+        """Prefer GROQ_CHAT_MODEL when supplied, else fall back to GROQ_MODEL."""
+        return (self.groq_chat_model or self.groq_model).strip()
 
 settings = Settings()

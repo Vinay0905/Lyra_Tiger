@@ -174,6 +174,12 @@ export const OrbVisualizer: React.FC<OrbVisualizerProps> = ({ width, height }) =
   const orbState  = useAppStore((s) => s.orbState)
   const volume    = useAppStore((s) => s.volumeLevel)
 
+  // Respect the OS "Reduce Motion" accessibility setting (U3)
+  const prefersReducedMotion =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
   // Keep refs so the animation loop always reads latest values without re-mounting
   const stateRef  = useRef<OrbState>(orbState)
   const volumeRef = useRef<number>(volume)
@@ -266,12 +272,17 @@ export const OrbVisualizer: React.FC<OrbVisualizerProps> = ({ width, height }) =
     const animate = () => {
       rafId = requestAnimationFrame(animate)
 
+      // Battery/visibility-aware throttle: skip GPU work while the popover is
+      // hidden (blur/tray-toggle) — the render is pure overhead then. (U3)
+      if (typeof document !== 'undefined' && document.hidden) return
+
       const state = stateRef.current
       const rawVolume = volumeRef.current
       const stateCfg  = STATE_CONFIG[state]
 
-      // Time advances at state-specific speed
-      time += 0.01 * stateCfg.speed * 1.5
+      // Time advances at state-specific speed (slowed under Reduce Motion)
+      const motionScale = prefersReducedMotion ? 0.15 : 1.0
+      time += 0.01 * stateCfg.speed * 1.5 * motionScale
 
       // Smoothed audio: layered on top of AnalyserNode's own smoothingTimeConstant.
       // Fast attack (0.25), slow decay (0.08) — different per state.
@@ -306,13 +317,15 @@ export const OrbVisualizer: React.FC<OrbVisualizerProps> = ({ width, height }) =
       material.uniforms.uGlow.value       = currentGlow
 
       // Thinking: slow, restrained internal rotation — NOT a cosmic spin
-      if (state === 'thinking') {
-        mesh.rotation.y += 0.004
-        mesh.rotation.x += 0.0015
-      } else {
-        // Gentle orbit drift for other states
-        mesh.rotation.y += 0.0025
-        mesh.rotation.z += 0.001
+      if (!prefersReducedMotion) {
+        if (state === 'thinking') {
+          mesh.rotation.y += 0.004
+          mesh.rotation.x += 0.0015
+        } else {
+          // Gentle orbit drift for other states
+          mesh.rotation.y += 0.0025
+          mesh.rotation.z += 0.001
+        }
       }
 
       renderer.render(scene, camera)
