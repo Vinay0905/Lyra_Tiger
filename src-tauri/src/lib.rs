@@ -3,6 +3,7 @@ use tauri::{
     Manager, Runtime,
 };
 use tauri_plugin_positioner::{Position, WindowExt};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 /// Toggle the popover window: position it below the tray icon then show/hide.
 fn toggle_window<R: Runtime>(app: &tauri::AppHandle<R>) {
@@ -23,9 +24,24 @@ fn toggle_window<R: Runtime>(app: &tauri::AppHandle<R>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ⌥Space (Option+Space) summons / dismisses the popover from anywhere.
+    let summon_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
-        .setup(|app| {
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler({
+                    let summon_shortcut = summon_shortcut.clone();
+                    move |app, shortcut, event| {
+                        if shortcut == &summon_shortcut && event.state() == ShortcutState::Pressed {
+                            toggle_window(app);
+                        }
+                    }
+                })
+                .build(),
+        )
+        .setup(move |app| {
             // Debug logging (dev builds only)
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -33,6 +49,11 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+
+            // Register the global summon shortcut.
+            if let Err(err) = app.global_shortcut().register(summon_shortcut.clone()) {
+                eprintln!("[Lyra] Failed to register global shortcut: {err}");
             }
 
             // ── macOS: run as an accessory so we never appear in the Dock ──

@@ -1,12 +1,17 @@
-import { useRef, useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useAppStore } from '../store/useAppStore'
+import { useSettingsStore } from '../store/useSettingsStore'
 
-// ─── Singleton AudioContext (persists across renders, survives re-renders) ─────
+// ─── Singleton AudioContext (persists across renders) ──────────────────────────
 let _ctx: AudioContext | null = null
 let _analyser: AnalyserNode | null = null
-// Track the active buffer source so we can stop it
 let _bufferSource: AudioBufferSourceNode | null = null
+let _gainNode: GainNode | null = null
 let _rafId: number | null = null
+
+// Sentence-chunked streaming TTS queue (A2)
+const _queue: string[] = []
+let _isPlaying = false
 
 function getOrCreateContext(): { ctx: AudioContext; analyser: AnalyserNode } {
   if (!_ctx || _ctx.state === 'closed') {
@@ -14,7 +19,6 @@ function getOrCreateContext(): { ctx: AudioContext; analyser: AnalyserNode } {
     _ctx = new Ctx()
     _analyser = _ctx.createAnalyser()
     _analyser.fftSize = 256
-    // 0.82 gives stable frame-to-frame averaging (MDN recommended range 0.8–0.9)
     _analyser.smoothingTimeConstant = 0.82
     _analyser.connect(_ctx.destination)
   }
@@ -23,131 +27,130 @@ function getOrCreateContext(): { ctx: AudioContext; analyser: AnalyserNode } {
 
 export function useSpeechPlayer() {
   const { setOrbState, setVolumeLevel, addAuditLog } = useAppStore()
-  // We keep isSpeakerActive in a ref so the async closure always reads latest
   const speakerActiveRef = useRef(useAppStore.getState().isSpeakerActive)
+
   useEffect(() => {
     return useAppStore.subscribe((s) => {
       speakerActiveRef.current = s.isSpeakerActive
+      if (_gainNode) _gainNode.gain.value = s.isSpeakerActive ? 1.0 : 0.0
     })
   }, [])
 
-  /**
-   * unlockAudio — MUST be called inside every synchronous user-gesture handler.
-   * WKWebView only permits AudioContext.resume() from a direct user interaction.
-   */
   const unlockAudio = () => {
     const { ctx } = getOrCreateContext()
-    if (ctx.state === 'suspended') {
-      ctx.resume().catch(() => {})
-    }
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {})
   }
 
-  const playSpeech = async (text: string) => {
-    // Stop any active playback immediately
-    _interrupt()
+  const _startSampleLoop = (analyser: AnalyserNode) => {
+    const dataArray = new Uint8Array(analyser.frequencyBinCount)
+    let smoothedRMS = 0
+    const sampleLoop = () => {
+      analyser.getByteFrequencyData(dataArray)
+      let sumSq = 0
+      for (let i = 0; i < dataArray.length; i++) {
+        const v = dataArray[i] / 255
+        sumSq += v * v
+      }
+      const rms = Math.sqrt(sumSq / dataArray.length)
+      const alpha = rms > smoothedRMS ? 0.3 : 0.08
+      smoothedRMS += (rms - smoothedRMS) * alpha
+      setVolumeLevel(Math.min(smoothedRMS * 4.0, 1.0))
+      _rafId = requestAnimationFrame(sampleLoop)
+    }
+    sampleLoop()
+  }
 
-    if (!text) return
+  const _playNext = async () => {
+    if (_queue.length === 0) {
+      _isPlaying = false
+      if (_rafId) {
+        cancelAnimationFrame(_rafId)
+        _rafId = null
+      }
+      setOrbState('idle')
+      setVolumeLevel(0)
+      return
+    }
+    _isPlaying = true
+    const text = _queue.shift()!
+    if (!text.trim()) return _playNext()
 
     try {
       const { ctx, analyser } = getOrCreateContext()
-
-      // ── Ensure context is running before we do anything ─────────────────
-      if (ctx.state === 'suspended') {
-        await ctx.resume()
-      }
+      if (ctx.state === 'suspended') await ctx.resume()
       if (ctx.state !== 'running') {
-        // Context still not running — autoplay fully blocked; bail gracefully
-        console.warn('[Speech] AudioContext blocked, cannot play.')
         addAuditLog('Audio blocked — tap the orb first to unlock.')
+        _isPlaying = false
         return
       }
 
-      // ── Fetch WAV as ArrayBuffer (avoids HTMLAudioElement autoplay block) ─
-      // This approach bypasses WKWebView's HTMLAudioElement play() restriction
-      // entirely: BufferSourceNode playback is not gated by autoplay policy.
-      addAuditLog('Fetching TTS audio...')
-      const encodedText = encodeURIComponent(text)
-      const resp = await fetch(`http://127.0.0.1:8000/tts?text=${encodedText}`)
+      const { backendUrl, voice } = useSettingsStore.getState()
+      const resp = await fetch(
+        `${backendUrl}/tts?text=${encodeURIComponent(text)}&voice=${encodeURIComponent(voice)}`,
+      )
       if (!resp.ok) throw new Error(`TTS HTTP ${resp.status}`)
+      const audioBuf = await ctx.decodeAudioData(await resp.arrayBuffer())
 
-      const arrayBuf = await resp.arrayBuffer()
-      const audioBuf = await ctx.decodeAudioData(arrayBuf)
-
-      // If something else started playing while we were fetching, stop it
-      _interrupt()
-
-      // ── Build BufferSource → Analyser → Destination ──────────────────────
       const source = ctx.createBufferSource()
       source.buffer = audioBuf
-
-      // Honour mute state: insert a GainNode so we can silence without stopping
       const gainNode = ctx.createGain()
       gainNode.gain.value = speakerActiveRef.current ? 1.0 : 0.0
-
       source.connect(gainNode)
       gainNode.connect(analyser)
-      // analyser already connected to destination in getOrCreateContext()
-
       _bufferSource = source
+      _gainNode = gainNode
 
-      // ── Render-loop: continuously sample analyser frame-by-frame ─────────
-      const dataArray = new Uint8Array(analyser.frequencyBinCount)
-      let smoothedRMS = 0
-
-      const sampleLoop = () => {
-        analyser.getByteFrequencyData(dataArray)
-
-        let sumSq = 0
-        for (let i = 0; i < dataArray.length; i++) {
-          const v = dataArray[i] / 255
-          sumSq += v * v
-        }
-        const rms = Math.sqrt(sumSq / dataArray.length)
-        // Layered software smoothing: fast attack, slow decay
-        const alpha = rms > smoothedRMS ? 0.3 : 0.08
-        smoothedRMS += (rms - smoothedRMS) * alpha
-        setVolumeLevel(Math.min(smoothedRMS * 4.0, 1.0))
-
-        _rafId = requestAnimationFrame(sampleLoop)
-      }
+      if (_rafId === null) _startSampleLoop(analyser)
+      setOrbState('speaking')
 
       source.onended = () => {
-        if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null }
         _bufferSource = null
-        setOrbState('idle')
-        setVolumeLevel(0)
-        addAuditLog('TTS playback completed.')
+        _gainNode = null
+        void _playNext()
       }
-
-      setOrbState('speaking')
-      addAuditLog('TTS playback started.')
       source.start(0)
-      sampleLoop()
-
-      // Keep gain in sync with speaker toggle while playing
-      const unsubscribe = useAppStore.subscribe((s) => {
-        gainNode.gain.value = s.isSpeakerActive ? 1.0 : 0.0
-      })
-      source.addEventListener('ended', unsubscribe, { once: true })
-
     } catch (err) {
       console.error('[Speech] Playback error:', err)
-      setOrbState('error')
-      setVolumeLevel(0)
       addAuditLog(`TTS error: ${String(err)}`)
+      _isPlaying = false
+      setOrbState('idle')
+      setVolumeLevel(0)
     }
+  }
+
+  /** Queue a chunk of text for sequential playback (used by streaming). */
+  const enqueueSpeech = (text: string) => {
+    const { ttsEnabled } = useSettingsStore.getState()
+    if (!ttsEnabled || !text.trim()) return
+    _queue.push(text.trim())
+    if (!_isPlaying) void _playNext()
+  }
+
+  /** Replace any pending speech with a single utterance. */
+  const playSpeech = (text: string) => {
+    _interrupt()
+    enqueueSpeech(text)
   }
 
   const interrupt = () => _interrupt()
 
-  return { playSpeech, interrupt, unlockAudio }
+  return { playSpeech, enqueueSpeech, interrupt, unlockAudio }
 }
 
-// ─── Module-level stop helper ─────────────────────────────────────────────────
 function _interrupt() {
-  if (_rafId) { cancelAnimationFrame(_rafId); _rafId = null }
+  _queue.length = 0
+  _isPlaying = false
+  if (_rafId) {
+    cancelAnimationFrame(_rafId)
+    _rafId = null
+  }
   if (_bufferSource) {
-    try { _bufferSource.stop() } catch (_) {}
+    try {
+      _bufferSource.onended = null
+      _bufferSource.stop()
+    } catch {
+      /* already stopped */
+    }
     _bufferSource = null
   }
 }

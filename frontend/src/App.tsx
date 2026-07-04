@@ -10,15 +10,20 @@ import {
   Terminal,
   ChevronUp,
   ChevronDown,
+  Command,
+  Settings as SettingsIcon,
   X,
 } from 'lucide-react'
 import { useAppStore } from './store/useAppStore'
 import { OrbVisualizer } from './components/OrbVisualizer'
+import { Transcript } from './components/Transcript'
+import { CommandPalette } from './components/CommandPalette'
+import { SettingsPanel } from './components/SettingsPanel'
 import { useWindowResizer } from './hooks/useWindowResizer'
 import { useVoiceCapture } from './hooks/useVoiceCapture'
 import { useSpeechPlayer } from './hooks/useSpeechPlayer'
+import { useCommandStream } from './hooks/useCommandStream'
 
-// ─── Ambient glow config per state ────────────────────────────────────────────
 const GLOW_CONFIG = {
   idle:      'radial-gradient(ellipse at 50% 40%, rgba(0,100,255,0.16) 0%, transparent 70%)',
   listening: 'radial-gradient(ellipse at 50% 40%, rgba(0,220,255,0.20) 0%, transparent 65%)',
@@ -27,13 +32,11 @@ const GLOW_CONFIG = {
   error:     'radial-gradient(ellipse at 50% 40%, rgba(200,30,30,0.18) 0%, transparent 70%)',
 }
 
-// ─── Panel entry animation ────────────────────────────────────────────────────
 const panelVariants = {
   hidden:  { opacity: 0, y: -10, scale: 0.97 },
-  visible: { opacity: 1, y: 0,   scale: 1,
+  visible: { opacity: 1, y: 0, scale: 1,
     transition: { type: 'spring' as const, damping: 28, stiffness: 300, duration: 0.25 } },
-  exit:    { opacity: 0, y: -10, scale: 0.97,
-    transition: { duration: 0.15, ease: 'easeIn' as const } },
+  exit:    { opacity: 0, y: -10, scale: 0.97, transition: { duration: 0.15, ease: 'easeIn' as const } },
 }
 
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -47,64 +50,80 @@ async function hideWindow() {
 }
 
 function App() {
-  // no-op since Rust owns the window now
   useWindowResizer()
 
-  const { playSpeech, interrupt, unlockAudio } = useSpeechPlayer()
-  const { isRecording, startRecording, stopRecording } = useVoiceCapture(playSpeech, interrupt)
+  const { enqueueSpeech, interrupt, unlockAudio } = useSpeechPlayer()
+  const { isRecording, startRecording, stopRecording } = useVoiceCapture(enqueueSpeech, interrupt)
+  const { sendCommand } = useCommandStream()
 
   const {
     orbState,
     isMuted,
     isSpeakerActive,
-    commandReply,
     auditLogs,
-    setOrbState,
     toggleMute,
     toggleSpeaker,
-    addAuditLog,
-    setCommandReply,
     clearLogs,
   } = useAppStore()
 
-  const [textInput, setTextInput]         = useState('')
-  const [showTextDrawer, setShowTextDrawer]   = useState(false)
-  const [showLogsDrawer, setShowLogsDrawer]   = useState(false)
-  const logsEndRef        = useRef<HTMLDivElement>(null)
-  const replyContainerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: 'smooth' }) },
-    [auditLogs, showLogsDrawer])
+  const [textInput, setTextInput] = useState('')
+  const [showTextDrawer, setShowTextDrawer] = useState(false)
+  const [showLogsDrawer, setShowLogsDrawer] = useState(false)
+  const [showPalette, setShowPalette] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
+  const logsEndRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (replyContainerRef.current) replyContainerRef.current.scrollTop = 0
-  }, [commandReply])
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [auditLogs, showLogsDrawer])
 
-  const handleTextSubmit = async () => {
+  // ── Global keyboard: Cmd/Ctrl+K palette, Esc dismiss (U1) ─────────────────
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        unlockAudio()
+        setShowPalette((v) => !v)
+      } else if (e.key === 'Escape') {
+        if (showPalette) setShowPalette(false)
+        else if (showSettings) setShowSettings(false)
+        else if (showTextDrawer) setShowTextDrawer(false)
+        else void hideWindow()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showPalette, showSettings, showTextDrawer, unlockAudio])
+
+  // ── Auto-focus the input whenever the popover is summoned (U1) ────────────
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    ;(async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window')
+        unlisten = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+          if (focused) {
+            unlockAudio()
+            setShowTextDrawer(true)
+            setTimeout(() => inputRef.current?.focus(), 60)
+          }
+        })
+      } catch (err) { console.error('focus listener error', err) }
+    })()
+    return () => { if (unlisten) unlisten() }
+  }, [unlockAudio])
+
+  useEffect(() => {
+    if (showTextDrawer) setTimeout(() => inputRef.current?.focus(), 40)
+  }, [showTextDrawer])
+
+  const handleTextSubmit = () => {
     const query = textInput.trim()
     if (!query) return
     setTextInput('')
-    unlockAudio()
-    interrupt()
-    setCommandReply(`"${query}"`)
-    setOrbState('thinking')
-    addAuditLog(`Sent: "${query}"`)
-
-    try {
-      const r = await fetch('http://127.0.0.1:8000/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: query }),
-      })
-      const data = await r.json()
-      setCommandReply(data.reply)
-      playSpeech(data.reply)
-      addAuditLog(`Reply [${data.route}] received.`)
-    } catch (err) {
-      addAuditLog(`Error: ${err}`)
-      setOrbState('error')
-      setCommandReply('API connection failed.')
-    }
+    void sendCommand(query)
   }
 
   const handleVoiceTrigger = () => {
@@ -114,33 +133,22 @@ function App() {
   }
 
   const statusColor = {
-    idle:      'bg-emerald-400',
-    listening: 'bg-cyan-400',
-    thinking:  'bg-indigo-400',
-    speaking:  'bg-blue-400',
-    error:     'bg-rose-500',
+    idle: 'bg-emerald-400', listening: 'bg-cyan-400', thinking: 'bg-indigo-400',
+    speaking: 'bg-blue-400', error: 'bg-rose-500',
   }[orbState]
 
-  const statusLabel = orbState === 'idle' ? 'Ready'
-    : orbState.charAt(0).toUpperCase() + orbState.slice(1)
+  const statusLabel = orbState === 'idle' ? 'Ready' : orbState.charAt(0).toUpperCase() + orbState.slice(1)
 
   return (
-    // Full viewport — transparent background, click-through safe
     <div className="w-full h-full relative select-none overflow-hidden flex flex-col items-center pt-[10px]">
-
-      {/* ── Notch / caret pointing up to the menu bar icon ────────────── */}
       <div
         style={{
-          width: 0,
-          height: 0,
-          borderLeft: '10px solid transparent',
-          borderRight: '10px solid transparent',
-          borderBottom: '10px solid rgba(20,20,25,0.95)',
-          flexShrink: 0,
+          width: 0, height: 0,
+          borderLeft: '10px solid transparent', borderRight: '10px solid transparent',
+          borderBottom: '10px solid rgba(20,20,25,0.95)', flexShrink: 0,
         }}
       />
 
-      {/* ── Main panel ──────────────────────────────────────────────────── */}
       <motion.div
         key="panel"
         variants={panelVariants}
@@ -153,25 +161,21 @@ function App() {
           border: '1px solid rgba(255,255,255,0.08)',
           boxShadow: '0 24px 64px rgba(0,0,0,0.7)',
           backdropFilter: 'blur(24px)',
+          WebkitBackdropFilter: 'blur(24px)',
         }}
       >
-        {/* Ambient glow overlay */}
         <div
           className="absolute inset-0 pointer-events-none rounded-2xl transition-all duration-700"
           style={{ background: GLOW_CONFIG[orbState] }}
         />
 
-        {/* ── Header ──────────────────────────────────────────────────── */}
+        {/* Header */}
         <div
           data-tauri-drag-region
           className="flex items-center justify-between px-4 py-3 z-10 relative border-b border-white/[0.06] cursor-move select-none"
         >
-          {/* Lyra wordmark */}
-          <span className="text-sm font-semibold tracking-widest text-white/80 uppercase">
-            Lyra
-          </span>
+          <span className="text-sm font-semibold tracking-widest text-white/80 uppercase">Lyra</span>
 
-          {/* Status pill */}
           <div
             data-tauri-no-drag
             className="flex items-center gap-1.5 bg-black/40 border border-white/[0.07] px-3 py-1 rounded-full text-[11px] font-medium text-neutral-300 cursor-default"
@@ -180,49 +184,52 @@ function App() {
             <span>{statusLabel}</span>
           </div>
 
-          {/* Close → hides the window (tray icon remains) */}
-          <button
-            data-tauri-no-drag
-            onClick={hideWindow}
-            className="p-1.5 rounded-full hover:bg-white/8 text-neutral-500 hover:text-white transition-colors"
-            title="Hide (click menu bar icon to reopen)"
-          >
-            <X size={15} />
-          </button>
-        </div>
-
-        {/* ── Centre: Orb + Reply text ─────────────────────────────────── */}
-        <div className="flex-1 flex flex-col items-center justify-center overflow-hidden z-10 relative px-4">
-          {/* Fixed-size orb */}
-          <div style={{ width: 130, height: 130, flexShrink: 0 }}>
-            <OrbVisualizer width={130} height={130} />
-          </div>
-
-          <div
-            ref={replyContainerRef}
-            className="w-full text-center text-[13px] font-light text-neutral-300 mt-3 overflow-y-auto leading-relaxed"
-            style={{ maxHeight: 72, scrollbarWidth: 'none' }}
-          >
-            {commandReply || 'How can I help you?'}
+          <div className="flex items-center gap-1" data-tauri-no-drag>
+            <button
+              onClick={() => { unlockAudio(); setShowPalette(true) }}
+              className="p-1.5 rounded-full hover:bg-white/8 text-neutral-500 hover:text-white transition-colors"
+              title="Command palette (⌘K)"
+            >
+              <Command size={14} />
+            </button>
+            <button
+              onClick={() => setShowSettings(true)}
+              className="p-1.5 rounded-full hover:bg-white/8 text-neutral-500 hover:text-white transition-colors"
+              title="Settings"
+            >
+              <SettingsIcon size={14} />
+            </button>
+            <button
+              onClick={hideWindow}
+              className="p-1.5 rounded-full hover:bg-white/8 text-neutral-500 hover:text-white transition-colors"
+              title="Hide (⌥Space to reopen)"
+            >
+              <X size={15} />
+            </button>
           </div>
         </div>
 
-        {/* ── Bottom controls ──────────────────────────────────────────── */}
+        {/* Centre: Orb + Transcript */}
+        <div className="flex-1 flex flex-col items-center justify-center overflow-hidden z-10 relative px-2 py-2 gap-2">
+          <div style={{ width: 110, height: 110, flexShrink: 0 }}>
+            <OrbVisualizer width={110} height={110} />
+          </div>
+          <Transcript />
+        </div>
+
+        {/* Bottom controls */}
         <div className="flex items-center justify-between w-full px-5 pb-4 pt-2 z-10 relative">
-          {/* Mic mute toggle */}
           <button
             onClick={toggleMute}
             className={`p-3 rounded-full border transition-all ${
-              isMuted
-                ? 'bg-rose-950/40 border-rose-800/50 text-rose-400'
-                : 'bg-white/[0.04] border-white/10 text-neutral-400 hover:text-white hover:bg-white/8'
+              isMuted ? 'bg-rose-950/40 border-rose-800/50 text-rose-400'
+                      : 'bg-white/[0.04] border-white/10 text-neutral-400 hover:text-white hover:bg-white/8'
             }`}
             title={isMuted ? 'Unmute Mic' : 'Mute Mic'}
           >
             {isMuted ? <MicOff size={18} /> : <Mic size={18} />}
           </button>
 
-          {/* Central voice trigger */}
           <button
             onClick={handleVoiceTrigger}
             className={`w-[56px] h-[56px] rounded-full flex items-center justify-center shadow-lg transition-all duration-200 ${
@@ -247,14 +254,12 @@ function App() {
             )}
           </button>
 
-          {/* Right action cluster */}
           <div className="flex gap-2">
             <button
               onClick={() => { unlockAudio(); setShowTextDrawer(!showTextDrawer) }}
               className={`p-3 rounded-full border transition-all ${
-                showTextDrawer
-                  ? 'bg-blue-950/40 border-blue-700/40 text-blue-400'
-                  : 'bg-white/[0.04] border-white/10 text-neutral-400 hover:text-white hover:bg-white/8'
+                showTextDrawer ? 'bg-blue-950/40 border-blue-700/40 text-blue-400'
+                               : 'bg-white/[0.04] border-white/10 text-neutral-400 hover:text-white hover:bg-white/8'
               }`}
               title="Type a command"
             >
@@ -263,9 +268,8 @@ function App() {
             <button
               onClick={toggleSpeaker}
               className={`p-3 rounded-full border transition-all ${
-                !isSpeakerActive
-                  ? 'bg-rose-950/40 border-rose-800/50 text-rose-400'
-                  : 'bg-white/[0.04] border-white/10 text-neutral-400 hover:text-white hover:bg-white/8'
+                !isSpeakerActive ? 'bg-rose-950/40 border-rose-800/50 text-rose-400'
+                                 : 'bg-white/[0.04] border-white/10 text-neutral-400 hover:text-white hover:bg-white/8'
               }`}
               title={isSpeakerActive ? 'Mute Speaker' : 'Unmute Speaker'}
             >
@@ -274,7 +278,7 @@ function App() {
           </div>
         </div>
 
-        {/* ── Keyboard drawer ─────────────────────────────────────────── */}
+        {/* Keyboard drawer */}
         <AnimatePresence>
           {showTextDrawer && (
             <motion.div
@@ -290,12 +294,12 @@ function App() {
               </div>
               <div className="flex gap-2">
                 <input
+                  ref={inputRef}
                   type="text"
                   value={textInput}
                   onChange={(e) => setTextInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleTextSubmit()}
-                  placeholder="Type a command..."
-                  autoFocus
+                  placeholder="Type a command…"
                   className="flex-1 bg-neutral-900 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-neutral-100 outline-none focus:border-blue-500/50 transition-colors"
                 />
                 <button
@@ -309,7 +313,7 @@ function App() {
           )}
         </AnimatePresence>
 
-        {/* ── Logs drawer ─────────────────────────────────────────────── */}
+        {/* Logs drawer */}
         <div className="absolute right-4 top-[52px] z-10 flex flex-col items-end">
           <button
             onClick={() => setShowLogsDrawer(!showLogsDrawer)}
@@ -323,7 +327,7 @@ function App() {
             {showLogsDrawer && (
               <motion.div
                 initial={{ opacity: 0, y: -8, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0,  scale: 1 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: -8, scale: 0.95 }}
                 transition={{ duration: 0.15 }}
                 className="w-[200px] max-h-[130px] mt-2 bg-black/96 border border-white/8 rounded-xl p-3 shadow-xl overflow-y-auto text-[10px] font-mono text-neutral-400 flex flex-col gap-1"
@@ -341,6 +345,20 @@ function App() {
             )}
           </AnimatePresence>
         </div>
+
+        {/* Overlays */}
+        <AnimatePresence>
+          {showPalette && (
+            <CommandPalette
+              onClose={() => setShowPalette(false)}
+              onSend={(q) => sendCommand(q)}
+              onOpenSettings={() => { setShowPalette(false); setShowSettings(true) }}
+            />
+          )}
+        </AnimatePresence>
+        <AnimatePresence>
+          {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+        </AnimatePresence>
       </motion.div>
     </div>
   )
