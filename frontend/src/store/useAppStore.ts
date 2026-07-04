@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 
 export type OrbState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error'
+export type ConnectionStatus = 'connecting' | 'ready' | 'degraded' | 'disconnected'
 
 export interface ChatMessage {
   id: string
@@ -8,6 +9,9 @@ export interface ChatMessage {
   content: string
   route?: string
   streaming?: boolean
+  skillResult?: Record<string, unknown> | null
+  pendingAction?: Record<string, unknown> | null
+  resolved?: boolean
 }
 
 function makeId(): string {
@@ -17,12 +21,14 @@ function makeId(): string {
 
 interface AppState {
   orbState: OrbState
+  connection: ConnectionStatus
   isMuted: boolean
   isSpeakerActive: boolean
   isExpanded: boolean
   volumeLevel: number
   auditLogs: string[]
   messages: ChatMessage[]
+  setConnection: (status: ConnectionStatus) => void
   setOrbState: (state: OrbState) => void
   toggleMute: () => void
   toggleSpeaker: () => void
@@ -40,6 +46,7 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set) => ({
   orbState: 'idle',
+  connection: 'connecting',
   isMuted: false,
   isSpeakerActive: true,
   isExpanded: false,
@@ -47,6 +54,7 @@ export const useAppStore = create<AppState>((set) => ({
   auditLogs: ['[System] Lyra Interface Booted.'],
   messages: [],
 
+  setConnection: (connection) => set({ connection }),
   setOrbState: (orbState) => set({ orbState }),
   toggleMute: () => set((state) => ({ isMuted: !state.isMuted })),
   toggleSpeaker: () => set((state) => ({ isSpeakerActive: !state.isSpeakerActive })),

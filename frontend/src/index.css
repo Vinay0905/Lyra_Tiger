@@ -1,5 +1,54 @@
 @import "tailwindcss";
 
+/* ── Design tokens (UN2) ─────────────────────────────────────────────────────
+   Single source of truth for surface/text/accent/space/radius/elevation.
+   Defaults are dark; the prefers-color-scheme block below adapts to macOS. */
+:root {
+  --lyra-surface: 12 12 16;          /* rgb triplets for rgb()/opacity */
+  --lyra-surface-2: 20 20 25;
+  --lyra-elevated: 255 255 255;
+  --lyra-text: 235 235 240;
+  --lyra-text-muted: 160 160 170;
+  --lyra-border: 255 255 255;
+  --lyra-accent: 59 130 246;
+  --lyra-accent-cyan: 0 220 255;
+  --lyra-danger: 244 63 94;
+  --lyra-ok: 52 211 153;
+
+  --lyra-radius-sm: 8px;
+  --lyra-radius-md: 12px;
+  --lyra-radius-lg: 16px;
+  --lyra-radius-pill: 9999px;
+
+  --lyra-space-1: 4px;
+  --lyra-space-2: 8px;
+  --lyra-space-3: 12px;
+  --lyra-space-4: 16px;
+
+  --lyra-elevation: 0 24px 64px rgba(0, 0, 0, 0.7);
+  --lyra-panel-alpha: 0.96;
+  --lyra-border-alpha: 0.08;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --lyra-surface: 250 250 252;
+    --lyra-surface-2: 238 238 242;
+    --lyra-elevated: 0 0 0;
+    --lyra-text: 20 20 28;
+    --lyra-text-muted: 90 90 105;
+    --lyra-border: 0 0 0;
+    --lyra-accent: 37 99 235;
+    --lyra-accent-cyan: 0 150 190;
+    --lyra-elevation: 0 16px 48px rgba(0, 0, 0, 0.25);
+    --lyra-panel-alpha: 0.9;
+    --lyra-border-alpha: 0.1;
+    color-scheme: light;
+  }
+}
+
 html, body, #root {
   width: 100%;
   height: 100%;
@@ -8,7 +57,6 @@ html, body, #root {
   background: transparent;
   overflow: hidden;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-  color-scheme: dark;
 }
 
 /* Streaming transcript markdown (U2) */

@@ -4,6 +4,7 @@ from typing import AsyncGenerator, Optional
 import httpx
 
 from src.config import settings
+from src.resilience import resilient_call
 
 
 class ModularLLMClient:
@@ -42,14 +43,25 @@ class ModularLLMClient:
         errors = []
         for provider in self.chain:
             try:
+                # Each provider call is wrapped with timeout + retry + circuit
+                # breaker so a degraded provider fast-fails to the next (L3).
                 if provider == "groq" and self._is_valid_key(settings.groq_api_key):
-                    return await self._call_groq(prompt, system_instruction, model)
+                    return await resilient_call(
+                        "llm.groq", lambda: self._call_groq(prompt, system_instruction, model)
+                    )
                 elif provider == "openai" and self._is_valid_key(settings.openai_api_key):
-                    return await self._call_openai(prompt, system_instruction, model)
+                    return await resilient_call(
+                        "llm.openai", lambda: self._call_openai(prompt, system_instruction, model)
+                    )
                 elif provider == "gemini" and self._is_valid_key(settings.gemini_api_key):
-                    return await self._call_gemini(prompt, system_instruction)
+                    return await resilient_call(
+                        "llm.gemini", lambda: self._call_gemini(prompt, system_instruction)
+                    )
                 elif provider == "openrouter" and self._is_valid_key(settings.openrouter_api_key):
-                    return await self._call_openrouter(prompt, system_instruction, model)
+                    return await resilient_call(
+                        "llm.openrouter",
+                        lambda: self._call_openrouter(prompt, system_instruction, model),
+                    )
             except Exception as e:
                 err_msg = f"{provider.upper()} call failed: {str(e)}"
                 print(f"[LLM Fallback] Warning: {err_msg}")

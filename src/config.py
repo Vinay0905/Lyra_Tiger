@@ -53,9 +53,18 @@ class Settings(BaseSettings):
     # Developer settings
     approved_workspace_dirs: str = Field("", validation_alias="APPROVED_WORKSPACE_DIRS")
 
-    # Kimi WebBridge settings
-    webbridge_host: str = Field("127.0.0.1", validation_alias="WEBBRIDGE_HOST")
-    webbridge_port: int = Field(10086, validation_alias="WEBBRIDGE_PORT")
+    # Web engine (L1: owned Playwright engine, replaces Kimi WebBridge)
+    # Mode: "cdp" attaches to the user's real Chrome; "bundled" launches Playwright Chromium.
+    browser_mode: str = Field("cdp", validation_alias="BROWSER_MODE")
+    chrome_cdp_url: str = Field("http://127.0.0.1:9222", validation_alias="CHROME_CDP_URL")
+    browser_headless: bool = Field(False, validation_alias="BROWSER_HEADLESS")
+    browser_user_data_dir: str = Field("", validation_alias="BROWSER_USER_DATA_DIR")
+    # Comma-separated host allow/deny lists. Empty allowlist = allow all (except denied/internal).
+    browser_allowlist: str = Field("", validation_alias="BROWSER_ALLOWLIST")
+    browser_denylist: str = Field("", validation_alias="BROWSER_DENYLIST")
+    browser_nav_timeout_ms: int = Field(30000, validation_alias="BROWSER_NAV_TIMEOUT_MS")
+    browser_action_budget_s: float = Field(45.0, validation_alias="BROWSER_ACTION_BUDGET_S")
+    browser_idle_teardown_s: float = Field(300.0, validation_alias="BROWSER_IDLE_TEARDOWN_S")
 
     @field_validator("debug", mode="before")
     @classmethod
@@ -93,5 +102,13 @@ class Settings(BaseSettings):
     def primary_chat_model(self) -> str:
         """Prefer GROQ_CHAT_MODEL when supplied, else fall back to GROQ_MODEL."""
         return (self.groq_chat_model or self.groq_model).strip()
+
+    @property
+    def browser_allow_hosts(self) -> list[str]:
+        return [h.strip().lower() for h in self.browser_allowlist.split(",") if h.strip()]
+
+    @property
+    def browser_deny_hosts(self) -> list[str]:
+        return [h.strip().lower() for h in self.browser_denylist.split(",") if h.strip()]
 
 settings = Settings()
